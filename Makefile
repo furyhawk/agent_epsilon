@@ -1,5 +1,11 @@
 .PHONY: install format lint test run clean help db-init dev dev-down dev-logs dev-rebuild dev-frontend docker-clean stage stage-down prod prod-down
 
+# ── Container runtime detection (Docker / Podman) ─────────────────────────
+# Uses Docker if available, otherwise falls back to Podman.
+DOCKER := $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
+DOCKER_COMPOSE := $(shell command -v docker-compose 2>/dev/null || (command -v docker 2>/dev/null && echo "docker compose") || (command -v podman 2>/dev/null && echo "podman compose"))
+
+
 # === Environments ===========================================================
 # `make dev`   — local development (docker-compose.dev.yml + bind-mounted source)
 # `make stage` — staging (docker-compose.yml — built images, no live reload)
@@ -11,7 +17,7 @@
 define _wait_for_db
 	@echo "Waiting for PostgreSQL ($(1))..."
 	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
-		if docker compose -f $(1) exec -T db pg_isready -U postgres >/dev/null 2>&1; then \
+		if $(DOCKER_COMPOSE) -f $(1) exec -T db pg_isready -U postgres >/dev/null 2>&1; then \
 			echo "  ✅ DB ready"; exit 0; \
 		fi; \
 		printf '.'; sleep 2; \
@@ -29,18 +35,18 @@ COMPOSE_DEV_PROFILES := --profile antv
 # doesn't keep retrying user creation.
 dev:
 	@echo "▶ Building backend image…"
-	docker compose -f docker-compose.dev.yml build app
+	$(DOCKER_COMPOSE) -f docker-compose.dev.yml build app
 	@echo "▶ Starting services…"
-	@if ! docker compose -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) up -d; then \
+	@if ! $(DOCKER_COMPOSE) -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) up -d; then \
 		echo ""; \
 		echo "⚠ First start failed. Tearing down stale containers and retrying once…"; \
 		echo "  (volumes preserved — DB data is safe; use 'make clean' for a full wipe)"; \
-		docker compose -f docker-compose.dev.yml down --remove-orphans; \
-		docker compose -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) up -d; \
+		$(DOCKER_COMPOSE) -f docker-compose.dev.yml down --remove-orphans; \
+		$(DOCKER_COMPOSE) -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) up -d; \
 	fi
 	$(call _wait_for_db,docker-compose.dev.yml)
 	@echo "▶ Applying migrations…"
-	docker compose -f docker-compose.dev.yml exec -T app agent_epsilon db upgrade
+	$(DOCKER_COMPOSE) -f docker-compose.dev.yml exec -T app agent_epsilon db upgrade
 	@echo ""
 	@echo "🚀 Dev stack ready:"
 	@echo "   API:      http://localhost:8000"
@@ -55,12 +61,12 @@ dev:
 # clean either way. Replace email/password before deploying anywhere real.
 seed:
 	@echo "▶ Seeding admin user (admin@example.com / admin123)…"
-	@if docker compose -f docker-compose.dev.yml exec -T app \
+	@if $(DOCKER_COMPOSE) -f docker-compose.dev.yml exec -T app \
 		agent_epsilon user list 2>/dev/null \
 		| grep -q "admin@example.com"; then \
 		echo "  (admin@example.com already exists — nothing to do)"; \
 	else \
-		docker compose -f docker-compose.dev.yml exec -T app \
+		$(DOCKER_COMPOSE) -f docker-compose.dev.yml exec -T app \
 			agent_epsilon user create \
 				--email admin@example.com --password admin123 --superuser \
 		&& echo "  ✅ Admin created. Login at http://localhost:8000/admin"; \
@@ -70,51 +76,51 @@ seed:
 bootstrap: dev seed
 
 dev-down:
-	docker compose -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) down
+	$(DOCKER_COMPOSE) -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) down
 
 # Full wipe — containers, networks, AND volumes. Use after a corrupted state
 # (e.g. detached networks, port conflicts that left orphans). DESTROYS DB data.
 docker-clean:
 	@echo "▶ Removing containers, networks, AND volumes for the dev stack…"
 	@echo "  ⚠️  This deletes all local DB data and uploaded files."
-	docker compose -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) down -v --remove-orphans
+	$(DOCKER_COMPOSE) -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) down -v --remove-orphans
 	@echo "✅ Cleaned. Run 'make dev' to start fresh."
 
 dev-logs:
-	docker compose -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) logs -f
+	$(DOCKER_COMPOSE) -f docker-compose.dev.yml $(COMPOSE_DEV_PROFILES) logs -f
 
 dev-rebuild:
-	docker compose -f docker-compose.dev.yml build --no-cache app
-	docker compose -f docker-compose.dev.yml up -d --force-recreate app
+	$(DOCKER_COMPOSE) -f docker-compose.dev.yml build --no-cache app
+	$(DOCKER_COMPOSE) -f docker-compose.dev.yml up -d --force-recreate app
 dev-frontend:
-	docker compose -f docker-compose.frontend.yml up -d
+	$(DOCKER_COMPOSE) -f docker-compose.frontend.yml up -d
 	@echo ""
 	@echo "✅ Frontend at http://localhost:3000  (backend must be up — 'make dev')"
 
 # === Staging: built images, no bind mounts (production-like, local DB) ===
 stage:
-	docker compose -f docker-compose.yml up -d --build
+	$(DOCKER_COMPOSE) -f docker-compose.yml up -d --build
 	$(call _wait_for_db,docker-compose.yml)
-	docker compose -f docker-compose.yml exec -T app agent_epsilon db upgrade
+	$(DOCKER_COMPOSE) -f docker-compose.yml exec -T app agent_epsilon db upgrade
 	@echo "✅ Staging stack at http://localhost:8000"
 
 stage-down:
-	docker compose -f docker-compose.yml down
+	$(DOCKER_COMPOSE) -f docker-compose.yml down
 
 # === Production: external Nginx, real secrets in backend/.env ===
 prod:
 	@test -f backend/.env || (echo "❌ backend/.env missing — run 'cp backend/.env.example backend/.env' and fill in real secrets" && exit 1)
-	docker compose --env-file backend/.env -f docker-compose.prod.yml up -d --build
+	$(DOCKER_COMPOSE) --env-file backend/.env -f docker-compose.prod.yml up -d --build
 	@echo "▶ Waiting for DB then running migrations…"
 	@sleep 5
-	docker compose --env-file backend/.env -f docker-compose.prod.yml exec -T app agent_epsilon db upgrade
+	$(DOCKER_COMPOSE) --env-file backend/.env -f docker-compose.prod.yml exec -T app agent_epsilon db upgrade
 	@echo "✅ Production stack up. Configure your nginx host with nginx/nginx.conf"
 
 prod-down:
-	docker compose --env-file backend/.env -f docker-compose.prod.yml down
+	$(DOCKER_COMPOSE) --env-file backend/.env -f docker-compose.prod.yml down
 
 prod-logs:
-	docker compose --env-file backend/.env -f docker-compose.prod.yml logs -f
+	$(DOCKER_COMPOSE) --env-file backend/.env -f docker-compose.prod.yml logs -f
 
 # Legacy alias
 quickstart: dev
@@ -204,8 +210,8 @@ taskiq-scheduler:
 
 # === Docker: Backend (Development) ===
 docker-up:
-	docker compose build app
-	docker compose up -d
+	$(DOCKER_COMPOSE) build app
+	$(DOCKER_COMPOSE) up -d
 	@echo ""
 	@echo "✅ Backend services started!"
 	@echo "   API: http://localhost:8000"
@@ -214,21 +220,21 @@ docker-up:
 	@echo "   Redis: localhost:6379"
 
 docker-down:
-	docker compose down
-	docker compose -f docker-compose.frontend.yml down 2>/dev/null || true
+	$(DOCKER_COMPOSE) down
+	$(DOCKER_COMPOSE) -f docker-compose.frontend.yml down 2>/dev/null || true
 
 docker-logs:
-	docker compose logs -f
+	$(DOCKER_COMPOSE) logs -f
 
 docker-build:
-	docker compose build
+	$(DOCKER_COMPOSE) build
 
 docker-shell:
-	docker compose exec app /bin/bash
+	$(DOCKER_COMPOSE) exec app /bin/bash
 
 # === Docker: Frontend (Development) ===
 docker-frontend:
-	docker compose -f docker-compose.frontend.yml up -d
+	$(DOCKER_COMPOSE) -f docker-compose.frontend.yml up -d
 	@echo ""
 	@echo "✅ Frontend started!"
 	@echo "   URL: http://localhost:3000"
@@ -236,17 +242,17 @@ docker-frontend:
 	@echo "Note: Backend must be running (make docker-up)"
 
 docker-frontend-down:
-	docker compose -f docker-compose.frontend.yml down
+	$(DOCKER_COMPOSE) -f docker-compose.frontend.yml down
 
 docker-frontend-logs:
-	docker compose -f docker-compose.frontend.yml logs -f
+	$(DOCKER_COMPOSE) -f docker-compose.frontend.yml logs -f
 
 docker-frontend-build:
-	docker compose -f docker-compose.frontend.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.frontend.yml build
 
 # === Docker: Production (with Traefik) ===
 docker-prod:
-	docker compose -f docker-compose.prod.yml up -d
+	$(DOCKER_COMPOSE) -f docker-compose.prod.yml up -d
 	@echo ""
 	@echo "✅ Production services started with Traefik!"
 	@echo ""
@@ -256,31 +262,31 @@ docker-prod:
 	@echo "   Traefik: https://traefik.$$DOMAIN"
 
 docker-prod-down:
-	docker compose -f docker-compose.prod.yml down
+	$(DOCKER_COMPOSE) -f docker-compose.prod.yml down
 
 docker-prod-logs:
-	docker compose -f docker-compose.prod.yml logs -f
+	$(DOCKER_COMPOSE) -f docker-compose.prod.yml logs -f
 
 docker-prod-build:
-	docker compose -f docker-compose.prod.yml build
+	$(DOCKER_COMPOSE) -f docker-compose.prod.yml build
 
 # === Docker: Individual Services ===
 docker-db:
-	docker compose up -d db
+	$(DOCKER_COMPOSE) up -d db
 	@echo ""
 	@echo "✅ PostgreSQL started on port 5432"
 	@echo "   Connection: postgresql://postgres:postgres@localhost:5432/agent_epsilon"
 
 docker-db-stop:
-	docker compose stop db
+	$(DOCKER_COMPOSE) stop db
 
 docker-redis:
-	docker compose up -d redis
+	$(DOCKER_COMPOSE) up -d redis
 	@echo ""
 	@echo "✅ Redis started on port 6379"
 
 docker-redis-stop:
-	docker compose stop redis
+	$(DOCKER_COMPOSE) stop redis
 
 # === Vercel (Frontend Deployment) ===
 vercel-deploy:
