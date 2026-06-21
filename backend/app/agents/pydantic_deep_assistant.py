@@ -277,7 +277,7 @@ class PydanticDeepAssistant:
             # Cost tracking
             cost_tracking=True,
             # Thinking effort — "auto" lets pydantic-ai resolve per-provider
-            thinking=self.thinking_effort or "auto",
+            thinking=self.thinking_effort or None,
             # Extra tools (e.g. RAG search)
             **({"tools": extra_tools} if extra_tools else {}),
             **antv_kwargs,
